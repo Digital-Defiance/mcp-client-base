@@ -10,6 +10,7 @@ Shared MCP (Model Context Protocol) client base class providing consistent timeo
 - **Consistent Error Handling**: Unified error messages and recovery options
 - **Extensible Architecture**: Abstract base class that extensions can customize
 - **Comprehensive Logging**: Structured logging with timestamps and request IDs
+- **Diagnostic Commands**: Built-in commands for troubleshooting connection issues
 
 ## Installation
 
@@ -17,9 +18,7 @@ Shared MCP (Model Context Protocol) client base class providing consistent timeo
 npm install @ai-capabilities-suite/mcp-client-base
 ```
 
-## Usage
-
-### Extending the Base Client
+## Quick Start
 
 ```typescript
 import {
@@ -28,122 +27,268 @@ import {
 } from "@ai-capabilities-suite/mcp-client-base";
 import * as vscode from "vscode";
 
+// 1. Extend BaseMCPClient
 export class MyMCPClient extends BaseMCPClient {
-  constructor(
-    outputChannel: vscode.LogOutputChannel,
-    config?: Partial<MCPClientConfig>
-  ) {
-    super(outputChannel, config);
+  protected getServerCommand() {
+    return { command: "npx", args: ["-y", "@my-org/my-mcp-server"] };
   }
 
-  protected getServerCommand(): { command: string; args: string[] } {
+  protected getServerEnv() {
+    return { ...process.env };
+  }
+
+  protected async onServerReady() {
+    // Extension-specific initialization
+  }
+}
+
+// 2. Create and start the client
+const outputChannel = vscode.window.createOutputChannel("My Extension", {
+  log: true,
+});
+const client = new MyMCPClient(outputChannel);
+await client.start();
+
+// 3. Use the client
+const result = await client.callTool("my_tool", { param: "value" });
+```
+
+## Documentation
+
+- [API Reference](./docs/API.md) - Complete API documentation
+- [Extending BaseMCPClient](./docs/EXTENDING.md) - Guide to creating custom MCP clients
+- [Configuration Guide](./docs/CONFIGURATION.md) - Timeout and re-sync configuration
+- [Diagnostic Commands](./docs/DIAGNOSTICS.md) - Troubleshooting and diagnostic tools
+- [Troubleshooting Guide](./docs/TROUBLESHOOTING.md) - Common issues and solutions
+
+## Key Concepts
+
+### Connection States
+
+The client tracks connection state through a state machine:
+
+- `DISCONNECTED` - Not connected to server
+- `CONNECTING` - Attempting to establish connection
+- `CONNECTED` - Successfully connected and ready
+- `TIMEOUT_RETRYING` - Timeout occurred, attempting re-synchronization
+- `ERROR` - Unrecoverable error occurred
+
+### Timeout Handling
+
+Different request types have different timeout values:
+
+- **Initialization**: 60 seconds (server startup can be slow)
+- **Standard Requests**: 30 seconds (normal operations)
+- **Tools List**: 60 seconds (may involve discovery)
+
+### Re-synchronization
+
+When a timeout occurs during initialization, the client automatically attempts to re-synchronize using exponential backoff:
+
+1. First retry after 2 seconds
+2. Second retry after 3 seconds (2 × 1.5)
+3. Third retry after 4.5 seconds (3 × 1.5)
+
+## Usage Examples
+
+### Basic Extension
+
+```typescript
+import { BaseMCPClient } from "@ai-capabilities-suite/mcp-client-base";
+import * as vscode from "vscode";
+
+export class MyMCPClient extends BaseMCPClient {
+  constructor(outputChannel: vscode.LogOutputChannel) {
+    super(outputChannel, {
+      timeout: {
+        initializationTimeoutMs: 60000,
+        standardRequestTimeoutMs: 30000,
+        toolsListTimeoutMs: 60000,
+      },
+      reSync: {
+        maxRetries: 3,
+        retryDelayMs: 2000,
+        backoffMultiplier: 1.5,
+      },
+      logging: {
+        logLevel: "info",
+        logCommunication: true,
+      },
+    });
+  }
+
+  protected getServerCommand() {
     return {
       command: "npx",
       args: ["-y", "@my-org/my-mcp-server"],
     };
   }
 
-  protected getServerEnv(): Record<string, string> {
+  protected getServerEnv() {
     return { ...process.env };
   }
 
-  protected async onServerReady(): Promise<void> {
-    // Extension-specific initialization
-    await this.callTool("my_tool", {});
+  protected async onServerReady() {
+    // Verify server is working
+    await this.callTool("health_check", {});
   }
 
-  // Add extension-specific methods
-  async myCustomMethod(params: any): Promise<any> {
-    return await this.callTool("my_custom_tool", params);
+  // Extension-specific methods
+  async doSomething(params: any): Promise<any> {
+    return await this.callTool("my_tool", params);
   }
 }
 ```
 
-### Using the Client
+### Monitoring Connection State
 
 ```typescript
-const outputChannel = vscode.window.createOutputChannel("My Extension", {
-  log: true,
-});
-const client = new MyMCPClient(outputChannel, {
-  timeout: {
-    initializationTimeoutMs: 60000,
-    standardRequestTimeoutMs: 30000,
-  },
-  reSync: {
-    maxRetries: 3,
-    retryDelayMs: 2000,
-    backoffMultiplier: 1.5,
-  },
+const client = new MyMCPClient(outputChannel);
+
+// Subscribe to state changes
+const disposable = client.onStateChange((status) => {
+  console.log(`State: ${status.state}`);
+  console.log(`Message: ${status.message}`);
+  console.log(`Server Running: ${status.serverProcessRunning}`);
+
+  if (status.state === "ERROR") {
+    vscode.window.showErrorMessage(`Connection error: ${status.message}`);
+  }
 });
 
-// Start the client
 await client.start();
 
-// Subscribe to connection state changes
-client.getConnectionStatus(); // Get current status
-client.onStateChange((status) => {
-  console.log("Connection state:", status.state);
+// Later: cleanup
+disposable.dispose();
+client.stop();
+```
+
+### Using Diagnostic Commands
+
+```typescript
+import { diagnosticCommands } from "@ai-capabilities-suite/mcp-client-base";
+
+// Register your extension
+diagnosticCommands.registerExtension({
+  name: "my-extension",
+  displayName: "My Extension",
+  client: myClient,
 });
 
-// Use the client
-const result = await client.myCustomMethod({ foo: "bar" });
+// Reconnect to server
+await diagnosticCommands.reconnectToServer("my-extension");
 
-// Stop the client
-client.stop();
+// Restart server
+await diagnosticCommands.restartServer("my-extension");
+
+// Get diagnostics
+const diag = diagnosticCommands.getDiagnostics("my-extension");
+console.log(diagnosticCommands.formatDiagnostics(diag));
+
+// Get all extensions status
+const allDiag = diagnosticCommands.getAllDiagnostics();
+console.log(diagnosticCommands.formatAllDiagnostics());
 ```
 
 ## Configuration
 
-### Timeout Configuration
+### Default Configuration
 
 ```typescript
-interface TimeoutConfig {
-  initializationTimeoutMs: number; // Default: 60000 (60s)
-  standardRequestTimeoutMs: number; // Default: 30000 (30s)
-  toolsListTimeoutMs: number; // Default: 60000 (60s)
+{
+  timeout: {
+    initializationTimeoutMs: 60000,  // 60 seconds
+    standardRequestTimeoutMs: 30000,  // 30 seconds
+    toolsListTimeoutMs: 60000,        // 60 seconds
+  },
+  reSync: {
+    maxRetries: 3,                    // 3 retry attempts
+    retryDelayMs: 2000,               // 2 second initial delay
+    backoffMultiplier: 1.5,           // 1.5x backoff multiplier
+  },
+  logging: {
+    logLevel: 'info',                 // info level logging
+    logCommunication: true,           // log all communication
+  },
 }
 ```
 
-### Re-synchronization Configuration
+### Custom Configuration
 
 ```typescript
-interface ReSyncConfig {
-  maxRetries: number; // Default: 3
-  retryDelayMs: number; // Default: 2000 (2s)
-  backoffMultiplier: number; // Default: 1.5
-}
+const client = new MyMCPClient(outputChannel, {
+  timeout: {
+    initializationTimeoutMs: 120000, // 2 minutes for slow servers
+    standardRequestTimeoutMs: 45000, // 45 seconds for slow operations
+  },
+  reSync: {
+    maxRetries: 5, // More retry attempts
+    retryDelayMs: 1000, // Faster initial retry
+    backoffMultiplier: 2.0, // Aggressive backoff
+  },
+  logging: {
+    logLevel: "debug", // Verbose logging
+    logCommunication: true,
+  },
+});
 ```
 
-## Connection States
+## Architecture
 
-- `DISCONNECTED`: Not connected to server
-- `CONNECTING`: Attempting to connect
-- `CONNECTED`: Successfully connected
-- `TIMEOUT_RETRYING`: Timeout occurred, retrying connection
-- `ERROR`: Unrecoverable error occurred
+The package consists of four main components:
 
-## API
+1. **BaseMCPClient** - Abstract base class with core functionality
+2. **TimeoutManager** - Configurable timeout handling
+3. **ConnectionStateManager** - Connection state tracking and notifications
+4. **ReSyncManager** - Automatic re-synchronization with exponential backoff
 
-### BaseMCPClient
+```
+┌─────────────────────────────────────────────────────────────┐
+│              @ai-capabilities-suite/mcp-client-base         │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │              BaseMCPClient (Abstract)                   │ │
+│  │  ┌──────────────┐  ┌────────────────┐  ┌───────────┐ │ │
+│  │  │   Timeout    │  │ Re-sync Logic  │  │  Request  │ │ │
+│  │  │   Manager    │  │                │  │   Queue   │ │ │
+│  │  └──────────────┘  └────────────────┘  └───────────┘ │ │
+│  │  ┌──────────────────────────────────────────────────┐ │ │
+│  │  │        ConnectionStateManager                     │ │ │
+│  │  └──────────────────────────────────────────────────┘ │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+                            ▲
+                            │ extends
+          ┌─────────────────┼─────────────────┐
+          │                 │                  │
+┌─────────┴──────┐  ┌──────┴───────┐  ┌──────┴───────┐
+│ MCPProcessClient│  │MCPScreenshot │  │MCPDebugger   │
+│                 │  │   Client     │  │   Client     │
+└─────────────────┘  └──────────────┘  └──────────────┘
+```
 
-#### Lifecycle Methods
+## Testing
 
-- `async start(): Promise<void>` - Start the server and initialize connection
-- `stop(): void` - Stop the server and cleanup
-- `async reconnect(): Promise<boolean>` - Attempt to reconnect to the server
+The package includes comprehensive tests:
 
-#### Connection Management
+- **Unit Tests** - Test individual components in isolation
+- **Property-Based Tests** - Verify correctness properties across all inputs
+- **Integration Tests** - Test full client lifecycle
 
-- `getConnectionStatus(): ConnectionStatus` - Get current connection status
-- `getDiagnostics(): ServerDiagnostics` - Get detailed diagnostics
-- `isServerProcessAlive(): boolean` - Check if server process is running
+Run tests:
 
-#### Abstract Methods (Must Implement)
+```bash
+npm test
+```
 
-- `protected abstract getServerCommand(): { command: string; args: string[] }` - Return server command and args
-- `protected abstract getServerEnv(): Record<string, string>` - Return environment variables for server
-- `protected abstract onServerReady(): Promise<void>` - Called when server is ready
+## Contributing
+
+Contributions are welcome! Please ensure:
+
+1. All tests pass
+2. New features include tests
+3. Documentation is updated
+4. Code follows existing style
 
 ## License
 

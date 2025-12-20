@@ -56,6 +56,7 @@ export abstract class BaseMCPClient {
   protected lastError?: { message: string; timestamp: number };
   protected serverStderr: string = "";
   protected extensionName: string;
+  private isStopping: boolean = false;
 
   constructor(
     extensionName: string,
@@ -118,6 +119,9 @@ export abstract class BaseMCPClient {
    * Start the MCP server and initialize connection
    */
   async start(): Promise<void> {
+    // Reset stopping flag
+    this.isStopping = false;
+
     this.log("info", "Starting MCP server");
     this.stateManager.setState(ConnectionState.CONNECTING, {
       message: "Starting server process",
@@ -160,14 +164,28 @@ export abstract class BaseMCPClient {
    * Stop the MCP server and cleanup resources
    */
   stop(): void {
+    // Set flag to prevent any further logging
+    this.isStopping = true;
+
     this.log("info", "Stopping MCP server");
 
     // Clear all pending requests
     this.clearPendingRequests();
 
     // Kill server process if running
-    if (this.serverProcess && this.isServerProcessAlive()) {
-      this.serverProcess.kill();
+    if (this.serverProcess) {
+      // Remove all event listeners to prevent race conditions
+      this.serverProcess.removeAllListeners();
+
+      // Also remove listeners from streams
+      this.serverProcess.stdout?.removeAllListeners();
+      this.serverProcess.stderr?.removeAllListeners();
+      this.serverProcess.stdin?.removeAllListeners();
+
+      if (this.isServerProcessAlive()) {
+        this.serverProcess.kill();
+      }
+
       this.serverProcess = undefined;
     }
 
@@ -311,6 +329,25 @@ export abstract class BaseMCPClient {
    */
   getConnectionStatus(): ConnectionStatus {
     return this.stateManager.getStatus();
+  }
+
+  /**
+   * Subscribe to connection state changes
+   * @param listener Callback function to be called when state changes
+   * @returns Disposable to unregister the listener
+   */
+  onStateChange(listener: (status: ConnectionStatus) => void): {
+    dispose: () => void;
+  } {
+    return this.stateManager.onStateChange(listener);
+  }
+
+  /**
+   * Get re-sync configuration
+   * @returns Current re-sync configuration
+   */
+  getReSyncConfig() {
+    return this.config.reSync;
   }
 
   /**
@@ -575,27 +612,36 @@ export abstract class BaseMCPClient {
     message: string,
     ...args: unknown[]
   ): void {
-    const timestamp = new Date().toISOString();
-    const formattedMessage = `[${timestamp}] [${level.toUpperCase()}] [${
-      this.extensionName
-    }] ${message}`;
+    // Don't log if we're stopping (prevents race conditions with disposed output channel)
+    if (this.isStopping) {
+      return;
+    }
 
-    switch (level) {
-      case "trace":
-        this.outputChannel.trace(formattedMessage, ...args);
-        break;
-      case "debug":
-        this.outputChannel.debug(formattedMessage, ...args);
-        break;
-      case "info":
-        this.outputChannel.info(formattedMessage, ...args);
-        break;
-      case "warn":
-        this.outputChannel.warn(formattedMessage, ...args);
-        break;
-      case "error":
-        this.outputChannel.error(formattedMessage, ...args);
-        break;
+    try {
+      const timestamp = new Date().toISOString();
+      const formattedMessage = `[${timestamp}] [${level.toUpperCase()}] [${
+        this.extensionName
+      }] ${message}`;
+
+      switch (level) {
+        case "trace":
+          this.outputChannel.trace(formattedMessage, ...args);
+          break;
+        case "debug":
+          this.outputChannel.debug(formattedMessage, ...args);
+          break;
+        case "info":
+          this.outputChannel.info(formattedMessage, ...args);
+          break;
+        case "warn":
+          this.outputChannel.warn(formattedMessage, ...args);
+          break;
+        case "error":
+          this.outputChannel.error(formattedMessage, ...args);
+          break;
+      }
+    } catch (error) {
+      // Silently ignore logging errors (e.g., if output channel is disposed)
     }
   }
 
@@ -629,6 +675,7 @@ export abstract class BaseMCPClient {
 
       // Capture stderr
       this.serverProcess.stderr?.on("data", (data) => {
+        if (this.isStopping) return;
         const text = data.toString();
         this.serverStderr += text;
         this.log("warn", `Server stderr: ${text}`);
@@ -637,6 +684,7 @@ export abstract class BaseMCPClient {
       // Handle stdout (JSON-RPC messages)
       let buffer = "";
       this.serverProcess.stdout?.on("data", (data) => {
+        if (this.isStopping) return;
         buffer += data.toString();
 
         // Process complete JSON messages
