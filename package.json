@@ -1,6 +1,6 @@
 {
   "name": "@ai-capabilities-suite/mcp-client-base",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Shared MCP client base class with timeout handling, re-synchronization, and connection state management",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

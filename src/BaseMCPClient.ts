@@ -678,7 +678,13 @@ export abstract class BaseMCPClient {
         if (this.isStopping) return;
         const text = data.toString();
         this.serverStderr += text;
-        this.log("warn", `Server stderr: ${text}`);
+        
+        // Detect npx download activity
+        if (text.includes("npm notice") || text.includes("downloading") || text.includes("installed")) {
+          this.log("info", `Server setup: ${text.trim()}`);
+        } else {
+          this.log("warn", `Server stderr: ${text}`);
+        }
       });
 
       // Handle stdout (JSON-RPC messages)
@@ -707,6 +713,14 @@ export abstract class BaseMCPClient {
         "info",
         `Server process spawned with PID: ${this.serverProcess.pid}`
       );
+      
+      // Helpful message for npx-based servers
+      if (command === "npx") {
+        this.log(
+          "info",
+          `Note: First-time setup may take longer as npx downloads the package. Please wait...`
+        );
+      }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
